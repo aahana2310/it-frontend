@@ -14,41 +14,65 @@ export default function Home() {
   const flightMetaRef = useRef<Record<string, { color: string; source: Destination }>>({});
 
   useEffect(() => {
-    const eventSource = new EventSource("http://localhost:8080/flights/stream");
+    let eventSource: EventSource | null = null;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let retryCount = 0;
+    const MAX_RETRIES = 5;
 
-    eventSource.addEventListener("flights", (event) => {
-      try {
-        const parsedFlights: FlightState[] = JSON.parse(event.data);
-        
-        const enrichedFlights: EnrichedFlightState[] = parsedFlights.map(f => {
-          if (!flightMetaRef.current[f.id]) {
-            const hue = Math.floor(Math.random() * 360);
-            flightMetaRef.current[f.id] = {
-              color: `hsl(${hue}, 80%, 60%)`,
-              source: { lat: f.lat, lng: f.lng }
+    const connect = () => {
+      eventSource = new EventSource("http://localhost:8080/flights/stream");
+
+      eventSource.addEventListener("flights", (event) => {
+        // Reset retry count on successful connection and message
+        retryCount = 0;
+        try {
+          const parsedFlights: FlightState[] = JSON.parse(event.data);
+          
+          const enrichedFlights: EnrichedFlightState[] = parsedFlights.map(f => {
+            if (!flightMetaRef.current[f.id]) {
+              const hue = Math.floor(Math.random() * 360);
+              flightMetaRef.current[f.id] = {
+                color: `hsl(${hue}, 80%, 60%)`,
+                source: { lat: f.lat, lng: f.lng }
+              };
+            }
+            return {
+              ...f,
+              color: flightMetaRef.current[f.id].color,
+              source: flightMetaRef.current[f.id].source
             };
-          }
-          return {
-            ...f,
-            color: flightMetaRef.current[f.id].color,
-            source: flightMetaRef.current[f.id].source
-          };
-        });
+          });
 
-        setFlights(enrichedFlights);
-      } catch (error) {
-        console.error("Failed to parse flight data:", error);
-      }
-    });
+          setFlights(enrichedFlights);
+        } catch (error) {
+          console.error("Failed to parse flight data:", error);
+        }
+      });
 
-    eventSource.onerror = (error) => {
-      console.error("SSE connection error:", error);
-      eventSource.close();
-      // Optional: add reconnection logic here if needed
+      eventSource.onerror = (error) => {
+        console.error("SSE connection error:", error);
+        // Immediately close the connection to stop default browser auto-retry loop
+        eventSource?.close();
+
+        if (retryCount < MAX_RETRIES) {
+          retryCount++;
+          console.log(`Retrying connection in 3 seconds... (Attempt ${retryCount} of ${MAX_RETRIES})`);
+          reconnectTimer = setTimeout(connect, 3000);
+        } else {
+          console.error(`Max retries (${MAX_RETRIES}) reached. Stopping reconnection attempts.`);
+        }
+      };
     };
 
+    connect();
+
     return () => {
-      eventSource.close();
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
     };
   }, []);
 
